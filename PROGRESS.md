@@ -270,7 +270,7 @@ curl -s -H 'Range: bytes=0-99' -o /tmp/tribe-video.bin -w '%{http_code} %{size_d
   - User feedback: this is not acceptable; the visualization must use a real brain viewer/model library, not a hand-made approximation.
 - This version should be considered a discarded prototype, not the target design.
 
-### Current Direction: NiiVue Plugin / Library
+### Attempt 3: NiiVue Real Cortical Mesh
 - Chosen fallback library: `@niivue/niivue`.
 - Reason: NiiVue is an actual neuroimaging WebGL viewer and supports brain meshes/connectomes, unlike the improvised Three.js blob model.
 - Installed package:
@@ -278,40 +278,62 @@ curl -s -H 'Range: bytes=0-99' -o /tmp/tribe-video.bin -w '%{http_code} %{size_d
 - Downloaded real cortical mesh assets from the NiiVue demo-image repository into `public/models/`:
   - `public/models/JulichBrainAtlas31_LH.mz3`
   - `public/models/JulichBrainAtlas31_RH.mz3`
-- Intended implementation:
-  - Render the real cortical meshes with NiiVue.
-  - Overlay/update synced activation nodes or markers for the 7 tracked regions:
-    - visual cortex
-    - auditory cortex
-    - Heschl's gyrus
-    - Broca's area
-    - STS
-    - prefrontal
-    - motor cortex
-  - Use `features.json` region values as the v1 activation source.
-  - Keep raw `.npz` tensors server-side.
+- Recreated `components/BrainViewer3D.tsx` as a client-only NiiVue viewer:
+  - Attaches NiiVue directly to a canvas.
+  - Loads both `.mz3` cortical hemisphere meshes from `/models/`.
+  - Uses neutral cortical mesh styling instead of atlas label/colorbar overlays.
+  - Adds a NiiVue connectome overlay with activation nodes for the 7 tracked regions.
+  - Updates the connectome node size/color from the active `FeatureWindow`.
+  - Keeps raw `.npz` tensors server-side; browser still only consumes `features.json`.
+- Kept the current dashboard contract:
+  - video `currentTime` selects active feature window
+  - region buttons focus the chart
+  - Recharts timeline remains beside the brain viewer
+- Updated `.gitignore` so `public/models/*.mz3` can be tracked even though root-level `models/` remains ignored.
 
-### Current Code State / Warning
-- The NiiVue migration was interrupted mid-swap.
-- `components/BrainViewer3D.tsx` was deleted as part of replacing the plain Three.js prototype, but the new NiiVue version has **not** been written yet.
-- Until `BrainViewer3D.tsx` is recreated or the import is temporarily removed, the results dashboard may not build/run.
-- `package.json` / `package-lock.json` include the new 3D-related dependency changes.
+### Attempt 4: Timeline-Synced Activation Map Refinement
+- Clarified product intent: Text2Brain is only inspiration for the visual language of brain activation maps. It is **not** part of the backend pipeline and does **not** replace TRIBE v2.
+- Kept TRIBE v2 as the only neural signal source:
+  - `features.windows[].region_activations` remains the data driving the 3D brain.
+  - No Text2Brain inference, semantic prior, model download, or pipeline step was added.
+- Added `lib/brainVisualization.ts` as a reusable frontend mapping layer:
+  - centralizes bilateral region anchor points for the 7 creator-facing regions
+  - creates multiple halo/patch points per region instead of one marker per region
+  - interpolates activation values between adjacent feature windows using the current video time
+  - supports focus dimming/boosting when a region is selected
+- Updated `components/BrainViewer3D.tsx`:
+  - renders a denser NiiVue connectome cloud that reads more like an activation map than isolated beacons
+  - updates from `currentTime`, so scrubbing and playback can change the brain immediately instead of only swapping active windows
+  - shows the top active regions in a compact overlay panel
+  - dims non-focused regions and brightens/enlarges the focused region
+- Updated `components/ResultsDashboard.tsx` to pass `currentTime` into `BrainViewer3D`.
+
+### Current Code State
+- `components/BrainViewer3D.tsx` now renders an actual cortical brain mesh with a richer TRIBE-driven activation map overlay, not the discarded procedural circle/blob.
+- NiiVue requires WebGL2; the component shows a readable fallback if WebGL2 is unavailable.
+- The first NiiVue pass hit two issues that were fixed:
+  - NiiVue inferred file type from `name`, so display names without `.mz3` caused `toUpperCase` loader errors.
+  - Julich atlas meshes initially showed dense atlas labels/colorbar text; mesh layers/colorbar rendering were disabled for the base cortical surfaces.
+- The frontend brain visualization is now split across:
+  - `lib/brainRegions.ts` for canonical labels/colors/normalization
+  - `lib/brainVisualization.ts` for 3D anchor points, interpolation, and patch generation
+  - `components/BrainViewer3D.tsx` for NiiVue rendering
+
+### Verification
+- `npm run build` passes.
+- `npm run lint` passes with the same two pre-existing warnings in `download_reel.mjs`.
+- `/results/DVj0HP6CQOP` responds successfully on the existing local dev server at `http://localhost:3000`.
+- Previous browser screenshot verification showed the NiiVue cortical mesh rendering with activation beacons.
+- The latest activation-map refinement was build/lint verified, but a fresh interactive browser screenshot pass was not completed in this turn because the Browser plugin's Node REPL control tool was not exposed and Computer Use permissions were not granted.
 
 ### Next Steps for 3D Brain
-- Recreate `components/BrainViewer3D.tsx` using `@niivue/niivue`.
-- Attach NiiVue to a canvas in a client-only React component.
-- Load the two `.mz3` cortical meshes from `/models/`.
-- Add/update a NiiVue connectome or equivalent overlay from the active `FeatureWindow`.
-- Keep the current dashboard wiring:
-  - video `currentTime` selects active feature window
-  - clicking a region can focus the chart
-  - chart remains visible under/next to the brain
-- Verify:
-  - `npm run build`
-  - `npm run lint`
-  - `/results/DVj0HP6CQOP` loads without runtime errors
-  - video playback causes brain overlay values to change over time
-  - page degrades gracefully if WebGL is unavailable
+- Improve camera framing and visual polish:
+  - better default zoom/azimuth/elevation
+  - stronger contrast between cortical mesh and activation patches
+  - optional per-region hover/focus behavior on the mesh itself
+- Verify video playback updates activation patches over time in an interactive browser session.
+- Confirm the NiiVue viewer behaves acceptably in the in-app browser; Playwright Chromium may not expose WebGL2, but Chrome did render the mesh.
+- Decide whether to keep the Julich atlas meshes or replace them with cleaner cortex-only meshes if atlas geometry/metadata keeps fighting the UI.
 
 ## How to Run
 

@@ -1,256 +1,282 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BrainCircuit, Rotate3D } from "lucide-react";
 import * as THREE from "three";
-import { BrainCircuit } from "lucide-react";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { formatBrainRegion } from "@/lib/brainRegions";
 import {
-  brainRegionOrder,
-  formatBrainRegion,
-  getBrainRegionColor,
-  normalizeRegionActivation
-} from "@/lib/brainRegions";
+  fillHotspotIntensities,
+  getBrainHotspots,
+  getInterpolatedRegionStates
+} from "@/lib/brainVisualization";
 import type { FeatureWindow } from "@/lib/types";
+
+const MODEL_URL = "/models/brain.glb";
+const FALLOFF_SIGMA = 22;
+const EMISSIVE_BOOST = 0.65;
+const BASE_BRAIN_COLOR = 0x8a7a85;
+const BRAIN_SCALE = 0.013;
 
 type BrainViewer3DProps = {
   activeWindow?: FeatureWindow;
   windows: FeatureWindow[];
+  currentTime: number;
   isPlaying: boolean;
   focusedRegion: string | null;
   onRegionFocus: (region: string | null) => void;
 };
 
-type RegionMesh = THREE.Mesh<THREE.SphereGeometry, THREE.MeshStandardMaterial>;
-
-const regionPositions: Record<string, [number, number, number]> = {
-  visual_cortex: [0, -0.74, -0.58],
-  auditory_cortex: [-0.8, -0.08, 0.06],
-  heschls_gyrus: [0.8, -0.1, 0.08],
-  brocas_area: [-0.54, 0.26, 0.68],
-  sts: [0.52, 0.18, 0.66],
-  prefrontal: [0, 0.64, 0.72],
-  motor_cortex: [0, 0.42, -0.2]
+type StateRef = {
+  windows: FeatureWindow[];
+  currentTime: number;
+  focusedRegion: string | null;
+  isPlaying: boolean;
 };
 
-export function BrainViewer3D({
-  activeWindow,
-  windows,
-  isPlaying,
-  focusedRegion,
-  onRegionFocus
-}: BrainViewer3DProps) {
+function detectWebGL2(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return Boolean(document.createElement("canvas").getContext("webgl2"));
+  } catch {
+    return false;
+  }
+}
+
+export function BrainViewer3D(props: BrainViewer3DProps) {
+  const { windows, currentTime, isPlaying, focusedRegion, activeWindow } = props;
+  const [supportsWebGL2] = useState<boolean>(() => detectWebGL2());
   const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const groupRef = useRef<THREE.Group | null>(null);
-  const regionMeshesRef = useRef<Map<string, RegionMesh>>(new Map());
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const isPlayingRef = useRef(isPlaying);
-  const focusedRegionRef = useRef(focusedRegion);
-  const onRegionFocusRef = useRef(onRegionFocus);
 
-  const allActivations = useMemo(() => windows.map((window) => window.region_activations), [windows]);
+  const stateRef = useRef<StateRef>({ windows, currentTime, focusedRegion, isPlaying });
+  useEffect(() => {
+    stateRef.current.windows = windows;
+    stateRef.current.currentTime = currentTime;
+    stateRef.current.focusedRegion = focusedRegion;
+    stateRef.current.isPlaying = isPlaying;
+  });
 
-  const regionStates = useMemo(() => {
-    return brainRegionOrder.map((region) => ({
-      region,
-      ...normalizeRegionActivation(activeWindow, region, allActivations)
-    }));
-  }, [activeWindow, allActivations]);
+  const topRegions = useMemo(() => {
+    return getInterpolatedRegionStates(windows, currentTime)
+      .slice()
+      .sort((a, b) => b.normalizedIntensity - a.normalizedIntensity)
+      .slice(0, 3);
+  }, [windows, currentTime]);
 
   useEffect(() => {
-    isPlayingRef.current = isPlaying;
-  }, [isPlaying]);
+    if (!supportsWebGL2) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-  useEffect(() => {
-    focusedRegionRef.current = focusedRegion;
-  }, [focusedRegion]);
+    const hotspots = getBrainHotspots();
+    const intensities = new Float32Array(hotspots.count);
 
-  useEffect(() => {
-    onRegionFocusRef.current = onRegionFocus;
-  }, [onRegionFocus]);
+    let width = container.clientWidth || 1;
+    let height = container.clientHeight || 1;
 
-  useEffect(() => {
-    if (!containerRef.current || !canvasRef.current) return;
-    const containerElement = containerRef.current as HTMLDivElement;
-    const canvasElement = canvasRef.current as HTMLCanvasElement;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(width, height);
+    // OutputPass at end of composer handles tonemapping + sRGB conversion.
+    renderer.toneMapping = THREE.NoToneMapping;
+    container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(36, 1, 0.1, 100);
-    camera.position.set(0, 0.18, 5.2);
-    cameraRef.current = camera;
+    scene.background = new THREE.Color(0x05060a);
 
-    const renderer = new THREE.WebGLRenderer({ canvas: canvasElement, alpha: true, antialias: true });
-    renderer.setClearColor(0x000000, 0);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    rendererRef.current = renderer;
+    const camera = new THREE.PerspectiveCamera(38, width / height, 0.1, 100);
+    camera.position.set(0, 0.4, 4.4);
 
-    scene.add(new THREE.AmbientLight(0x8ff7ff, 0.45));
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.15);
-    keyLight.position.set(2.4, 3, 4);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    keyLight.position.set(3, 4, 6);
     scene.add(keyLight);
-    const rimLight = new THREE.PointLight(0x9d05ff, 2.3, 7);
-    rimLight.position.set(-2.4, 1.2, 2.2);
+    const rimLight = new THREE.DirectionalLight(0xa0c4ff, 0.55);
+    rimLight.position.set(-4, -2, -3);
     scene.add(rimLight);
+    const fillLight = new THREE.DirectionalLight(0xffd0c0, 0.35);
+    fillLight.position.set(0, -3, 4);
+    scene.add(fillLight);
 
-    const group = new THREE.Group();
-    group.rotation.x = -0.12;
-    scene.add(group);
-    groupRef.current = group;
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enablePan = false;
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 2.4;
+    controls.maxDistance = 6.5;
+    controls.target.set(0, 0, 0);
 
-    const shellGeometry = new THREE.IcosahedronGeometry(1.58, 4);
-    const shellMaterial = new THREE.MeshBasicMaterial({
-      color: 0x6df8ff,
-      transparent: true,
-      opacity: 0.11,
-      wireframe: true
+    const composer = new EffectComposer(renderer);
+    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    composer.setSize(width, height);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloom = new UnrealBloomPass(new THREE.Vector2(width, height), 0.55, 0.6, 0.7);
+    composer.addPass(bloom);
+    composer.addPass(new OutputPass());
+
+    const material = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(BASE_BRAIN_COLOR),
+      roughness: 0.55,
+      metalness: 0.04,
+      emissive: new THREE.Color(0x000000)
     });
-    const shell = new THREE.Mesh(shellGeometry, shellMaterial);
-    shell.scale.set(0.86, 1.04, 0.78);
-    group.add(shell);
+    const uniforms = {
+      uCenters: { value: hotspots.centers },
+      uColors: { value: hotspots.colors },
+      uIntensities: { value: intensities },
+      uFalloffSigma: { value: FALLOFF_SIGMA },
+      uEmissiveBoost: { value: EMISSIVE_BOOST }
+    };
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, uniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", `#include <common>\nvarying vec3 vBrainPos;`)
+        .replace("#include <begin_vertex>", `#include <begin_vertex>\nvBrainPos = position;`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "#include <common>",
+          `#include <common>
+varying vec3 vBrainPos;
+uniform vec3 uCenters[${hotspots.count}];
+uniform vec3 uColors[${hotspots.count}];
+uniform float uIntensities[${hotspots.count}];
+uniform float uFalloffSigma;
+uniform float uEmissiveBoost;`
+        )
+        .replace(
+          "#include <emissivemap_fragment>",
+          `#include <emissivemap_fragment>
+vec3 _glow = vec3(0.0);
+float _sigma2 = uFalloffSigma * uFalloffSigma;
+for (int i = 0; i < ${hotspots.count}; i++) {
+  vec3 _d = vBrainPos - uCenters[i];
+  float _w = exp(-dot(_d, _d) / _sigma2);
+  _glow += uColors[i] * uIntensities[i] * _w;
+}
+totalEmissiveRadiance += _glow * uEmissiveBoost;`
+        );
+    };
 
-    const meridianMaterial = new THREE.LineBasicMaterial({
-      color: 0x00f2ff,
-      transparent: true,
-      opacity: 0.18
-    });
-    for (let index = 0; index < 5; index += 1) {
-      const curve = new THREE.EllipseCurve(0, 0, 1.38, 0.9, 0, Math.PI * 2);
-      const points = curve.getPoints(96).map((point) => new THREE.Vector3(point.x, point.y, 0));
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), meridianMaterial);
-      line.rotation.y = (index / 5) * Math.PI;
-      line.rotation.x = Math.PI / 2;
-      group.add(line);
-    }
+    // Brain GLB is in MNI space (+X right, +Y anterior, +Z superior).
+    // Euler XYZ: Ry(π) faces brain to camera, then Rx(π/2) lifts MNI superior to world up.
+    const brainGroup = new THREE.Group();
+    brainGroup.scale.setScalar(BRAIN_SCALE);
+    brainGroup.rotation.set(Math.PI / 2, Math.PI, 0);
+    scene.add(brainGroup);
 
-    const meshes = new Map<string, RegionMesh>();
-    for (const region of brainRegionOrder) {
-      const geometry = new THREE.SphereGeometry(0.13, 32, 32);
-      const color = new THREE.Color(getBrainRegionColor(region));
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        emissive: color,
-        emissiveIntensity: 0.6,
-        roughness: 0.35,
-        metalness: 0.18
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.position.set(...regionPositions[region]);
-      mesh.userData.region = region;
-      group.add(mesh);
-      meshes.set(region, mesh);
-    }
-    regionMeshesRef.current = meshes;
-
-    const raycaster = new THREE.Raycaster();
-    const pointer = new THREE.Vector2();
-
-    function resize() {
-      const rect = containerElement.getBoundingClientRect();
-      const width = Math.max(1, rect.width);
-      const height = Math.max(1, rect.height);
-      renderer.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    }
-
-    function pickRegion(event: PointerEvent) {
-      const rect = canvasElement.getBoundingClientRect();
-      pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-      raycaster.setFromCamera(pointer, camera);
-      const hits = raycaster.intersectObjects([...meshes.values()]);
-      if (!hits[0]) return;
-      const region = String(hits[0].object.userData.region);
-      onRegionFocusRef.current(focusedRegionRef.current === region ? null : region);
-    }
-
-    const resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(containerElement);
-    canvasElement.addEventListener("pointerdown", pickRegion);
-    resize();
+    const loader = new GLTFLoader();
+    let disposed = false;
+    let loadedScene: THREE.Group | null = null;
+    loader.load(
+      MODEL_URL,
+      (gltf) => {
+        if (disposed) return;
+        loadedScene = gltf.scene;
+        loadedScene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.isMesh) {
+            mesh.material = material;
+            mesh.castShadow = false;
+            mesh.receiveShadow = false;
+          }
+        });
+        brainGroup.add(loadedScene);
+      },
+      undefined,
+      (err) => console.error("[BrainViewer3D] GLB load failed:", err)
+    );
 
     let frameId = 0;
-    function animate() {
-      frameId = requestAnimationFrame(animate);
-      group.rotation.y += isPlayingRef.current ? 0.006 : 0.002;
-      renderer.render(scene, camera);
-    }
-    animate();
+    const tick = () => {
+      const state = stateRef.current;
+      fillHotspotIntensities(state.windows, state.currentTime, state.focusedRegion, intensities);
+      controls.update();
+      composer.render();
+      frameId = requestAnimationFrame(tick);
+    };
+    frameId = requestAnimationFrame(tick);
+
+    const handleResize = () => {
+      if (!container) return;
+      width = container.clientWidth || 1;
+      height = container.clientHeight || 1;
+      renderer.setSize(width, height);
+      composer.setSize(width, height);
+      bloom.setSize(width, height);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+    };
+    const observer = new ResizeObserver(handleResize);
+    observer.observe(container);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(frameId);
-      canvasElement.removeEventListener("pointerdown", pickRegion);
-      resizeObserver.disconnect();
+      observer.disconnect();
+      controls.dispose();
+      composer.dispose();
       renderer.dispose();
-      shellGeometry.dispose();
-      shellMaterial.dispose();
-      meridianMaterial.dispose();
-      meshes.forEach((mesh) => {
-        mesh.geometry.dispose();
-        mesh.material.dispose();
-      });
-      regionMeshesRef.current.clear();
-      groupRef.current = null;
-      rendererRef.current = null;
-      cameraRef.current = null;
+      material.dispose();
+      if (loadedScene) {
+        loadedScene.traverse((obj) => {
+          const mesh = obj as THREE.Mesh;
+          if (mesh.isMesh) mesh.geometry.dispose();
+        });
+      }
+      if (renderer.domElement.parentNode === container) {
+        container.removeChild(renderer.domElement);
+      }
     };
-  }, []);
+  }, [supportsWebGL2]);
 
-  useEffect(() => {
-    for (const state of regionStates) {
-      const mesh = regionMeshesRef.current.get(state.region);
-      if (!mesh) continue;
-      const isFocused = focusedRegion === state.region;
-      const scale = 0.78 + state.normalizedIntensity * 1.45 + (isFocused ? 0.38 : 0);
-      mesh.scale.setScalar(scale);
-      mesh.material.opacity = focusedRegion && !isFocused ? 0.42 : 1;
-      mesh.material.transparent = Boolean(focusedRegion && !isFocused);
-      mesh.material.emissiveIntensity = 0.35 + state.normalizedIntensity * 1.7 + (isFocused ? 0.55 : 0);
-    }
-  }, [focusedRegion, regionStates]);
+  if (!supportsWebGL2) {
+    return (
+      <div className="panel relative flex min-h-[420px] flex-col items-center justify-center gap-3 rounded-lg p-6 text-center">
+        <BrainCircuit className="h-7 w-7 text-cyan" />
+        <p className="font-display text-sm uppercase tracking-[0.18em] text-cyan">3D brain unavailable</p>
+        <p className="max-w-xs text-xs text-zinc-500">
+          This browser does not expose WebGL2. Open the dashboard in Chrome or Safari Tech Preview.
+        </p>
+      </div>
+    );
+  }
 
   return (
-    <div className="panel relative min-h-[420px] overflow-hidden rounded-lg">
-      <div ref={containerRef} className="absolute inset-0 neural-grid">
-        <canvas ref={canvasRef} className="h-full w-full cursor-crosshair" aria-label="Interactive brain region activation viewer" />
+    <div className="panel relative overflow-hidden rounded-lg">
+      <div className="absolute left-4 top-4 z-10 flex items-center gap-2">
+        <BrainCircuit className="h-4 w-4 text-cyan" />
+        <span className="font-display text-xs uppercase tracking-[0.18em] text-cyan">Cortical activation</span>
+      </div>
+      <div className="absolute right-4 top-4 z-10 flex items-center gap-2 text-zinc-500">
+        <Rotate3D className="h-4 w-4" />
+        <span className="font-display text-[10px] uppercase tracking-[0.18em]">drag to rotate</span>
       </div>
 
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(0,242,255,.12),transparent_38%),linear-gradient(180deg,transparent,rgba(0,0,0,.38))]" />
+      <div ref={containerRef} className="h-[420px] w-full" />
 
-      <div className="relative z-10 flex h-full min-h-[420px] flex-col justify-between p-4">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <BrainCircuit className="h-5 w-5 text-cyan" />
-            <h2 className="font-display text-xl font-bold text-white">Cortical map</h2>
+      <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-10 flex flex-wrap items-end justify-between gap-3">
+        <div className="rounded border border-cyan/30 bg-black/55 px-3 py-2 backdrop-blur">
+          <div className="font-display text-[10px] uppercase tracking-[0.18em] text-zinc-500">Window</div>
+          <div className="mt-0.5 font-display text-sm text-white">
+            {activeWindow ? `${activeWindow.start_time}–${activeWindow.end_time}s` : "–"}
           </div>
-          <span className="rounded border border-white/10 bg-black/45 px-2.5 py-1 font-display text-[10px] uppercase tracking-[0.14em] text-zinc-300">
-            {focusedRegion ? formatBrainRegion(focusedRegion) : "All regions"}
-          </span>
         </div>
-
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {regionStates.map((state) => {
-            const isFocused = focusedRegion === state.region;
-            return (
-              <button
-                key={state.region}
-                type="button"
-                onClick={() => onRegionFocus(isFocused ? null : state.region)}
-                className={`min-h-14 rounded border bg-black/55 p-2 text-left transition ${
-                  isFocused ? "border-cyan shadow-cyan" : "border-white/10 hover:border-white/30"
-                }`}
-              >
-                <span className="flex items-center gap-2 font-display text-[10px] uppercase tracking-[0.12em] text-zinc-400">
-                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: getBrainRegionColor(state.region) }} />
-                  {formatBrainRegion(state.region)}
-                </span>
-                <span className="mt-1 block font-display text-base font-bold text-white">
-                  {state.rawValue.toFixed(3)}
-                  <span className="ml-2 text-[10px] font-medium text-cyan">{state.label}</span>
-                </span>
-              </button>
-            );
-          })}
+        <div className="flex flex-wrap gap-2">
+          {topRegions.map((state) => (
+            <div
+              key={state.region}
+              className="rounded border bg-black/55 px-2.5 py-1 font-display text-[10px] uppercase tracking-[0.14em] backdrop-blur"
+              style={{ borderColor: `${state.color}55`, color: state.color }}
+            >
+              <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full" style={{ backgroundColor: state.color }} />
+              {formatBrainRegion(state.region)} · {(state.normalizedIntensity * 100).toFixed(0)}
+            </div>
+          ))}
         </div>
       </div>
     </div>

@@ -36,13 +36,24 @@ activation is elevated").
 - Write like you're talking to the creator face-to-face."""
 
 DEFAULT_QUESTION = """\
-Based on this diagnosis, give me:
+Based on this diagnosis, write a concise creator brief in this exact structure:
 
-1. **HOOK VERDICT** — Do the first 3 seconds grab attention? If not, what should change?
-2. **TOP 3 MOMENTS** — Timestamps + what makes them work in plain language
-3. **TOP 3 WEAK SPOTS** — Timestamps + what's going wrong + specific fix for each
-4. **THE ONE CHANGE** — If you could only change ONE thing, what has the biggest impact?
-5. **RETENTION PREDICTION** — Where do most viewers likely drop off, and why?"""
+## Hook verdict
+1-2 sentences. Say whether the first 3 seconds work and what should change.
+
+## Best moment
+One timestamp and why it works in plain creator language.
+
+## Weakest moment
+One timestamp, what's going wrong, and the specific fix.
+
+## One change
+The single highest-impact edit.
+
+## Drop-off risk
+One sentence predicting where viewers likely leave and why.
+
+Keep the whole answer around 250-350 words. No long explanations, no extra sections."""
 
 
 def main():

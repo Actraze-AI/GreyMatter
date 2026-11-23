@@ -141,3 +141,28 @@ textarea {
 .sweep-line {
   animation: sweep 3.8s ease-in-out infinite;
 }
+
+@keyframes landing-preview-cycle {
+  0% {
+    opacity: 0;
+    transform: scale(1.035);
+  }
+  8% {
+    opacity: 0.68;
+  }
+  30% {
+    opacity: 0.68;
+  }
+  40% {
+    opacity: 0;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+}
+
+.landing-preview-frame {
+  animation: landing-preview-cycle 9.6s ease-in-out infinite;
+}
